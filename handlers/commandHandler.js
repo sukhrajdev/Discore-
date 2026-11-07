@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { Collection, Events, MessageFlags } = require('discord.js');
+const { errorEmbed } = require('../utils/embeds');
 
 /**
  * Recursively collects all `.js` command files under a given directory.
@@ -86,14 +87,17 @@ function registerCommandHandler(client) {
         error
       );
 
-      const errorMessage = 'An unexpected internal error occurred while processing your command.';
+      const fallbackEmbed = errorEmbed({
+        title: 'Unexpected Error',
+        description: 'An unexpected internal error occurred while processing your command.',
+      });
 
       try {
         if (interaction.replied || interaction.deferred) {
-          await interaction.editReply({ content: errorMessage });
+          await interaction.editReply({ embeds: [fallbackEmbed] });
         } else {
           await interaction.reply({
-            content: errorMessage,
+            embeds: [fallbackEmbed],
             flags: MessageFlags.Ephemeral,
           });
         }

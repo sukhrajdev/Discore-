@@ -6,6 +6,7 @@ const supabase = require('../config/supabase');
 const { loadCommands } = require('../handlers/commandHandler');
 const { hasRequiredRole, normalizeRole, getOrCreateUserRole } = require('../utils/rba');
 
+const helpCommand = require('../commands/general/help');
 const genCommand = require('../commands/generator/gen');
 const stockCommand = require('../commands/generator/stock');
 const createServiceCommand = require('../commands/admin/createservice');
@@ -14,7 +15,7 @@ const setRoleCommand = require('../commands/admin/setrole');
 
 /**
  * In-memory mock of Supabase (PostgREST + atomic RPC) to verify all command flows
- * including concurrent /gen calls and DM failure rollbacks.
+ * including concurrent /gen calls, Admin-to-Admin promotion, and DM failure rollbacks.
  */
 function createMockSupabase(initialState = {}) {
   const db = {
@@ -140,7 +141,9 @@ function createMockSupabase(initialState = {}) {
               };
             }
             const record = {
-              id: payload.id || `00000000-0000-0000-0000-${String(nextUuidCounter++).padStart(12, '0')}`,
+              id:
+                payload.id ||
+                `00000000-0000-0000-0000-${String(nextUuidCounter++).padStart(12, '0')}`,
               service_name: payload.service_name,
               email: payload.email,
               password: payload.password,
@@ -159,6 +162,19 @@ function createMockSupabase(initialState = {}) {
 }
 
 /**
+ * Helper to extract serialized embed JSON from an interaction reply or DM payload.
+ */
+function extractFirstEmbed(payload) {
+  assert.ok(payload && typeof payload === 'object', 'Expected reply payload object');
+  assert.ok(
+    Array.isArray(payload.embeds) && payload.embeds.length === 1,
+    'Expected reply payload to contain an embed'
+  );
+  const raw = payload.embeds[0];
+  return typeof raw.toJSON === 'function' ? raw.toJSON() : raw;
+}
+
+/**
  * Helper to create a mock Discord ChatInputCommandInteraction.
  */
 function createMockInteraction({
@@ -171,7 +187,7 @@ function createMockInteraction({
   const state = {
     deferred: false,
     deferOptions: undefined,
-    replyContent: null,
+    replyPayload: null,
     dmsSent: [],
   };
 
@@ -181,13 +197,13 @@ function createMockInteraction({
     inGuild: () => inGuild,
     user: {
       id: userId,
-      async send(content) {
+      async send(payload) {
         if (dmShouldFail) {
           const err = new Error('Cannot send messages to this user');
           err.code = 50007;
           throw err;
         }
-        state.dmsSent.push(content);
+        state.dmsSent.push(payload);
       },
     },
     options: {
@@ -206,22 +222,50 @@ function createMockInteraction({
       state.deferOptions = opts;
     },
     async editReply(payload) {
-      state.replyContent = typeof payload === 'string' ? payload : payload.content;
-      return state.replyContent;
+      state.replyPayload = payload;
+      return payload;
     },
   };
 }
 
-test('Command Loader loads all 5 modular slash commands with valid JSON schemas', () => {
+test('Command Loader loads all 6 modular slash commands including /help', () => {
   const commands = loadCommands();
-  assert.equal(commands.size, 5);
+  assert.equal(commands.size, 6);
 
-  const expectedNames = ['gen', 'stock', 'createservice', 'addstock', 'setrole'];
+  const expectedNames = ['help', 'gen', 'stock', 'createservice', 'addstock', 'setrole'];
   for (const name of expectedNames) {
     assert.ok(commands.has(name), `Expected command /${name} to be loaded`);
     const json = commands.get(name).data.toJSON();
     assert.equal(json.name, name);
   }
+});
+
+test('/help returns rich overview embed and per-command embed with caller RBA role', async () => {
+  const mockDb = createMockSupabase({
+    users: { premium_member: 'Premium' },
+  });
+  supabase.setSupabaseClient(mockDb);
+
+  // Overview help menu
+  const overviewInt = createMockInteraction({
+    userId: 'premium_member',
+    options: {},
+  });
+  await helpCommand.execute(overviewInt);
+  const overviewEmbed = extractFirstEmbed(overviewInt.state.replyPayload);
+  assert.equal(overviewEmbed.title, 'Account Generator Bot — Help Menu');
+  assert.match(overviewEmbed.description, /Premium/);
+  assert.equal(overviewEmbed.fields.length, 3);
+
+  // Specific command help (/help command:setrole)
+  const detailInt = createMockInteraction({
+    userId: 'premium_member',
+    options: { command: 'setrole' },
+  });
+  await helpCommand.execute(detailInt);
+  const detailEmbed = extractFirstEmbed(detailInt.state.replyPayload);
+  assert.equal(detailEmbed.title, 'Command Help — /setrole');
+  assert.match(detailEmbed.description, /promote other users to Admin/);
 });
 
 test('RBA role hierarchy and normalization work accurately and fail closed', async () => {
@@ -247,7 +291,7 @@ test('RBA role hierarchy and normalization work accurately and fail closed', asy
   assert.equal(mockDb.db.users.get('222222222222222222'), 'Free');
 });
 
-test('/gen replies publicly with unavailable message on missing service, wrong channel, low role, or empty stock', async () => {
+test('/gen replies publicly with unavailable embed on missing service, wrong channel, low role, or empty stock', async () => {
   const mockDb = createMockSupabase({
     users: {
       free_user: 'Free',
@@ -264,45 +308,23 @@ test('/gen replies publicly with unavailable message on missing service, wrong c
   });
   supabase.setSupabaseClient(mockDb);
 
-  // 1. Non-existent service
-  const nonExistentInteraction = createMockInteraction({
-    userId: 'premium_user',
-    channelId: 'chan_netflix',
-    options: { service: 'unknown' },
-  });
-  await genCommand.execute(nonExistentInteraction);
-  assert.equal(nonExistentInteraction.state.deferOptions, undefined); // Public reply
-  assert.equal(nonExistentInteraction.state.replyContent, 'Currently not available for you.');
+  const cases = [
+    { userId: 'premium_user', channelId: 'chan_netflix', options: { service: 'unknown' } },
+    { userId: 'premium_user', channelId: 'wrong_channel', options: { service: 'netflix' } },
+    { userId: 'free_user', channelId: 'chan_netflix', options: { service: 'netflix' } },
+    { userId: 'premium_user', channelId: 'chan_netflix', options: { service: 'netflix' } },
+  ];
 
-  // 2. Wrong channel_id
-  const wrongChannelInteraction = createMockInteraction({
-    userId: 'premium_user',
-    channelId: 'wrong_channel',
-    options: { service: 'netflix' },
-  });
-  await genCommand.execute(wrongChannelInteraction);
-  assert.equal(wrongChannelInteraction.state.replyContent, 'Currently not available for you.');
-
-  // 3. Insufficient RBA role (Free < Premium)
-  const lowRoleInteraction = createMockInteraction({
-    userId: 'free_user',
-    channelId: 'chan_netflix',
-    options: { service: 'netflix' },
-  });
-  await genCommand.execute(lowRoleInteraction);
-  assert.equal(lowRoleInteraction.state.replyContent, 'Currently not available for you.');
-
-  // 4. Out of stock (0 rows)
-  const emptyStockInteraction = createMockInteraction({
-    userId: 'premium_user',
-    channelId: 'chan_netflix',
-    options: { service: 'netflix' },
-  });
-  await genCommand.execute(emptyStockInteraction);
-  assert.equal(emptyStockInteraction.state.replyContent, 'Currently not available for you.');
+  for (const testCase of cases) {
+    const interaction = createMockInteraction(testCase);
+    await genCommand.execute(interaction);
+    assert.equal(interaction.state.deferOptions, undefined); // Public reply
+    const embed = extractFirstEmbed(interaction.state.replyPayload);
+    assert.equal(embed.description, 'Currently not available for you.');
+  }
 });
 
-test('/gen atomically claims & deletes 1 stock row, DMs user, prevents race conditions, and rolls back on closed DMs', async () => {
+test('/gen atomically claims & deletes 1 stock row, sends DM embed, prevents race conditions, and rolls back on closed DMs', async () => {
   const mockDb = createMockSupabase({
     users: {
       user_a: 'Premium',
@@ -343,21 +365,25 @@ test('/gen atomically claims & deletes 1 stock row, DMs user, prevents race cond
     genCommand.execute(interactionB),
   ]);
 
-  const replies = [interactionA.state.replyContent, interactionB.state.replyContent];
+  const embedA = extractFirstEmbed(interactionA.state.replyPayload);
+  const embedB = extractFirstEmbed(interactionB.state.replyPayload);
+  const descriptions = [embedA.description, embedB.description];
+
   assert.equal(
-    replies.filter((r) => r === 'Check your DMs! I have sent you the account.').length,
+    descriptions.filter((d) => d === 'Check your DMs! I have sent you the account.').length,
     1
   );
   assert.equal(
-    replies.filter((r) => r === 'Currently not available for you.').length,
+    descriptions.filter((d) => d === 'Currently not available for you.').length,
     1
   );
   assert.equal(mockDb.db.stock.length, 0);
 
   const winner =
     interactionA.state.dmsSent.length === 1 ? interactionA : interactionB;
+  const dmEmbed = extractFirstEmbed(winner.state.dmsSent[0]);
   assert.equal(
-    winner.state.dmsSent[0],
+    dmEmbed.description,
     'Congratulations you got a mcfa account here:\nEmail: steve@example.com\nPass: secretPassword123'
   );
 
@@ -377,11 +403,13 @@ test('/gen atomically claims & deletes 1 stock row, DMs user, prevents race cond
   });
 
   await genCommand.execute(closedDmInteraction);
+  const closedDmEmbed = extractFirstEmbed(closedDmInteraction.state.replyPayload);
+  assert.equal(closedDmEmbed.title, 'Direct Messages Disabled');
   assert.equal(mockDb.db.stock.length, 1);
   assert.equal(mockDb.db.stock[0].id, 'acc-2');
 });
 
-test('/stock returns exact formatted count and Admin commands enforce Admin RBA role', async () => {
+test('Existing Admin can grant another user Admin, newly promoted Admin has full Admin powers, and /stock returns embed', async () => {
   const mockDb = createMockSupabase({
     users: {
       admin_1: 'Admin',
@@ -392,24 +420,51 @@ test('/stock returns exact formatted count and Admin commands enforce Admin RBA 
   });
   supabase.setSupabaseClient(mockDb);
 
-  // Non-admin rejected from /createservice
+  // Non-admin rejected from /setrole with error embed
   const nonAdminAttempt = createMockInteraction({
     userId: 'free_1',
     options: {
-      name: 'mcfa',
-      role: 'Free',
-      channel: { id: 'chan_mcfa' },
+      user: { id: 'someone_else', bot: false },
+      role: 'Admin',
     },
   });
-  await createServiceCommand.execute(nonAdminAttempt);
+  await setRoleCommand.execute(nonAdminAttempt);
   assert.deepEqual(nonAdminAttempt.state.deferOptions, {
     flags: MessageFlags.Ephemeral,
   });
-  assert.match(nonAdminAttempt.state.replyContent, /Access denied/);
+  assert.equal(extractFirstEmbed(nonAdminAttempt.state.replyPayload).title, 'Access Denied');
 
-  // Admin creates 'mcfa' service
-  const createSvc = createMockInteraction({
+  // Admin cannot accidentally demote themselves from Admin
+  const selfDemoteAttempt = createMockInteraction({
     userId: 'admin_1',
+    options: {
+      user: { id: 'admin_1', bot: false },
+      role: 'Free',
+    },
+  });
+  await setRoleCommand.execute(selfDemoteAttempt);
+  assert.equal(
+    extractFirstEmbed(selfDemoteAttempt.state.replyPayload).title,
+    'Self-Demotion Blocked'
+  );
+  assert.equal(mockDb.db.users.get('admin_1'), 'Admin');
+
+  // Existing Admin promotes another user (not even in DB yet: brand_new_admin) to Admin
+  const grantAdminInt = createMockInteraction({
+    userId: 'admin_1',
+    options: {
+      user: { id: 'brand_new_admin', bot: false },
+      role: 'Admin',
+    },
+  });
+  await setRoleCommand.execute(grantAdminInt);
+  const grantAdminEmbed = extractFirstEmbed(grantAdminInt.state.replyPayload);
+  assert.equal(grantAdminEmbed.title, 'Admin Role Granted');
+  assert.equal(mockDb.db.users.get('brand_new_admin'), 'Admin');
+
+  // Newly promoted Admin can immediately create services, add stock, AND grant Admin to a 3rd user
+  const createSvc = createMockInteraction({
+    userId: 'brand_new_admin',
     options: {
       name: 'mcfa',
       role: 'Free',
@@ -417,12 +472,13 @@ test('/stock returns exact formatted count and Admin commands enforce Admin RBA 
     },
   });
   await createServiceCommand.execute(createSvc);
+  assert.equal(extractFirstEmbed(createSvc.state.replyPayload).title, 'Service Created');
   assert.ok(mockDb.db.services.has('mcfa'));
 
-  // Admin adds 15 stock accounts via /addstock
+  // Newly promoted Admin adds 15 stock accounts via /addstock
   for (let i = 1; i <= 15; i++) {
     const addStockInt = createMockInteraction({
-      userId: 'admin_1',
+      userId: 'brand_new_admin',
       options: {
         service: 'mcfa',
         email: `user${i}@example.com`,
@@ -430,27 +486,29 @@ test('/stock returns exact formatted count and Admin commands enforce Admin RBA 
       },
     });
     await addStockCommand.execute(addStockInt);
+    assert.equal(extractFirstEmbed(addStockInt.state.replyPayload).title, 'Stock Added');
   }
 
-  // Check /stock output matches prompt specification verbatim
+  // Newly promoted Admin promotes free_1 to Admin as well
+  const secondAdminPromotion = createMockInteraction({
+    userId: 'brand_new_admin',
+    options: {
+      user: { id: 'free_1', bot: false },
+      role: 'Admin',
+    },
+  });
+  await setRoleCommand.execute(secondAdminPromotion);
+  assert.equal(mockDb.db.users.get('free_1'), 'Admin');
+
+  // Check /stock embed output matches specification verbatim
   const stockInt = createMockInteraction({
     userId: 'free_1',
     options: { service: 'mcfa' },
   });
   await stockCommand.execute(stockInt);
+  const stockEmbed = extractFirstEmbed(stockInt.state.replyPayload);
   assert.equal(
-    stockInt.state.replyContent,
+    stockEmbed.description,
     'There are currently 15 accounts in stock for mcfa.'
   );
-
-  // Admin promotes free_1 to Premium via /setrole
-  const setRoleInt = createMockInteraction({
-    userId: 'admin_1',
-    options: {
-      user: { id: 'free_1' },
-      role: 'Premium',
-    },
-  });
-  await setRoleCommand.execute(setRoleInt);
-  assert.equal(mockDb.db.users.get('free_1'), 'Premium');
 });

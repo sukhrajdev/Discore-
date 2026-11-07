@@ -6,6 +6,7 @@ const {
 } = require('discord.js');
 const supabase = require('../../config/supabase');
 const { ROLE_CHOICES, normalizeRole, isAdmin } = require('../../utils/rba');
+const { successEmbed, errorEmbed } = require('../../utils/embeds');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -42,9 +43,14 @@ module.exports = {
     // Enforce Admin RBA role
     const hasAdminAccess = await isAdmin(supabase, interaction.user.id);
     if (!hasAdminAccess) {
-      return interaction.editReply(
-        'Access denied. You need the **Admin** RBA role to use this command.'
-      );
+      return interaction.editReply({
+        embeds: [
+          errorEmbed({
+            title: 'Access Denied',
+            description: 'You need the **Admin** RBA role to use this command.',
+          }),
+        ],
+      });
     }
 
     const serviceName = interaction.options.getString('name', true).trim().toLowerCase();
@@ -52,14 +58,27 @@ module.exports = {
     const channel = interaction.options.getChannel('channel', true);
 
     if (!serviceName || !/^[a-z0-9_-]{1,50}$/.test(serviceName)) {
-      return interaction.editReply(
-        'Invalid service name. Use 1–50 alphanumeric characters, hyphens, or underscores (e.g., `mcfa`, `netflix`).'
-      );
+      return interaction.editReply({
+        embeds: [
+          errorEmbed({
+            title: 'Invalid Service Name',
+            description:
+              'Use 1–50 alphanumeric characters, hyphens, or underscores (e.g., `mcfa`, `netflix`).',
+          }),
+        ],
+      });
     }
 
     const requiredRole = normalizeRole(rawRole);
     if (!requiredRole) {
-      return interaction.editReply('Invalid RBA role specified.');
+      return interaction.editReply({
+        embeds: [
+          errorEmbed({
+            title: 'Invalid Role',
+            description: 'Invalid RBA role specified.',
+          }),
+        ],
+      });
     }
 
     const { data, error } = await supabase
@@ -75,15 +94,30 @@ module.exports = {
     if (error) {
       // PostgreSQL unique_violation
       if (error.code === '23505') {
-        return interaction.editReply(
-          `A service named **${serviceName}** already exists.`
-        );
+        return interaction.editReply({
+          embeds: [
+            errorEmbed({
+              title: 'Service Already Exists',
+              description: `A service named **${serviceName}** already exists.`,
+            }),
+          ],
+        });
       }
       throw error;
     }
 
-    return interaction.editReply(
-      `Service **${data.name}** created!\n• Required RBA Role: **${data.required_role}**\n• Generator Channel: <#${data.channel_id}>`
-    );
+    return interaction.editReply({
+      embeds: [
+        successEmbed({
+          title: 'Service Created',
+          description: `Generator service **${data.name}** has been created.`,
+          fields: [
+            { name: 'Service Name', value: `\`${data.name}\``, inline: true },
+            { name: 'Required RBA Role', value: `**${data.required_role}**`, inline: true },
+            { name: 'Generator Channel', value: `<#${data.channel_id}>`, inline: true },
+          ],
+        }),
+      ],
+    });
   },
 };

@@ -6,6 +6,7 @@ const {
 const supabase = require('../../config/supabase');
 const { isAdmin } = require('../../utils/rba');
 const { autocompleteServiceName } = require('../../utils/autocomplete');
+const { successEmbed, errorEmbed } = require('../../utils/embeds');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -38,15 +39,20 @@ module.exports = {
    * @param {import('discord.js').ChatInputCommandInteraction} interaction
    */
   async execute(interaction) {
-    // Ephemeral reply ensures credentials/admin confirmations never leak to public chat
+    // Ephemeral embed reply ensures credentials/admin confirmations never leak to public chat
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     // Enforce Admin RBA role
     const hasAdminAccess = await isAdmin(supabase, interaction.user.id);
     if (!hasAdminAccess) {
-      return interaction.editReply(
-        'Access denied. You need the **Admin** RBA role to use this command.'
-      );
+      return interaction.editReply({
+        embeds: [
+          errorEmbed({
+            title: 'Access Denied',
+            description: 'You need the **Admin** RBA role to use this command.',
+          }),
+        ],
+      });
     }
 
     const serviceName = interaction.options.getString('service', true).trim().toLowerCase();
@@ -54,7 +60,14 @@ module.exports = {
     const password = interaction.options.getString('password', true);
 
     if (!email || !password) {
-      return interaction.editReply('Both `email` and `password` must be non-empty.');
+      return interaction.editReply({
+        embeds: [
+          errorEmbed({
+            title: 'Invalid Credentials',
+            description: 'Both `email` and `password` must be non-empty.',
+          }),
+        ],
+      });
     }
 
     const { data, error } = await supabase
@@ -70,15 +83,29 @@ module.exports = {
     if (error) {
       // PostgreSQL foreign_key_violation (service_name not in `services`)
       if (error.code === '23503') {
-        return interaction.editReply(
-          `Service **${serviceName}** does not exist. Create it first using \`/createservice\`.`
-        );
+        return interaction.editReply({
+          embeds: [
+            errorEmbed({
+              title: 'Service Not Found',
+              description: `Service **${serviceName}** does not exist. Create it first using \`/createservice\`.`,
+            }),
+          ],
+        });
       }
       throw error;
     }
 
-    return interaction.editReply(
-      `Successfully added 1 account to **${data.service_name}** stock (ID: \`${data.id}\`).`
-    );
+    return interaction.editReply({
+      embeds: [
+        successEmbed({
+          title: 'Stock Added',
+          description: `Successfully added 1 account to **${data.service_name}** stock.`,
+          fields: [
+            { name: 'Service', value: `\`${data.service_name}\``, inline: true },
+            { name: 'Stock ID', value: `\`${data.id}\``, inline: true },
+          ],
+        }),
+      ],
+    });
   },
 };

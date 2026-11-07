@@ -5,11 +5,12 @@ const {
 } = require('discord.js');
 const supabase = require('../../config/supabase');
 const { ROLE_CHOICES, normalizeRole, isAdmin } = require('../../utils/rba');
+const { successEmbed, warningEmbed, errorEmbed } = require('../../utils/embeds');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('setrole')
-    .setDescription("[Admin] Update a user's RBA role in the Users table")
+    .setDescription("[Admin] Update a user's RBA role (Free, Premium, or grant Admin)")
     .setContexts(InteractionContextType.Guild)
     .addUserOption((option) =>
       option
@@ -20,7 +21,7 @@ module.exports = {
     .addStringOption((option) =>
       option
         .setName('role')
-        .setDescription('The RBA role to assign')
+        .setDescription('The RBA role to assign (including promoting another user to Admin)')
         .setRequired(true)
         .addChoices(...ROLE_CHOICES)
     ),
@@ -31,12 +32,17 @@ module.exports = {
   async execute(interaction) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    // Enforce Admin RBA role
+    // Enforce Admin RBA role — any existing Admin can grant Free, Premium, or Admin to another user
     const hasAdminAccess = await isAdmin(supabase, interaction.user.id);
     if (!hasAdminAccess) {
-      return interaction.editReply(
-        'Access denied. You need the **Admin** RBA role to use this command.'
-      );
+      return interaction.editReply({
+        embeds: [
+          errorEmbed({
+            title: 'Access Denied',
+            description: 'You need the **Admin** RBA role to use this command.',
+          }),
+        ],
+      });
     }
 
     const targetUser = interaction.options.getUser('user', true);
@@ -44,7 +50,38 @@ module.exports = {
     const normalizedRole = normalizeRole(rawRole);
 
     if (!normalizedRole) {
-      return interaction.editReply('Invalid RBA role specified.');
+      return interaction.editReply({
+        embeds: [
+          errorEmbed({
+            title: 'Invalid Role',
+            description: 'Invalid RBA role specified.',
+          }),
+        ],
+      });
+    }
+
+    if (targetUser.bot) {
+      return interaction.editReply({
+        embeds: [
+          errorEmbed({
+            title: 'Invalid Target User',
+            description: 'Cannot assign RBA roles to Discord bot accounts.',
+          }),
+        ],
+      });
+    }
+
+    // Prevent an Admin from accidentally demoting themselves and losing Admin access
+    if (targetUser.id === interaction.user.id && normalizedRole !== 'Admin') {
+      return interaction.editReply({
+        embeds: [
+          warningEmbed({
+            title: 'Self-Demotion Blocked',
+            description:
+              'You cannot remove your own **Admin** role to prevent accidental lockout.',
+          }),
+        ],
+      });
     }
 
     const { data, error } = await supabase
@@ -63,8 +100,22 @@ module.exports = {
       throw error;
     }
 
-    return interaction.editReply(
-      `Updated <@${data.discord_id}>'s RBA role to **${data.rba_role}**.`
-    );
+    const isAdminPromotion = data.rba_role === 'Admin';
+
+    return interaction.editReply({
+      embeds: [
+        successEmbed({
+          title: isAdminPromotion ? 'Admin Role Granted' : 'User Role Updated',
+          description: isAdminPromotion
+            ? `<@${data.discord_id}> has been granted the **Admin** RBA role and can now manage services, stock, and user roles.`
+            : `Updated <@${data.discord_id}>'s RBA role to **${data.rba_role}**.`,
+          fields: [
+            { name: 'User', value: `<@${data.discord_id}>`, inline: true },
+            { name: 'Assigned Role', value: `**${data.rba_role}**`, inline: true },
+            { name: 'Updated By', value: `<@${interaction.user.id}>`, inline: true },
+          ],
+        }),
+      ],
+    });
   },
 };

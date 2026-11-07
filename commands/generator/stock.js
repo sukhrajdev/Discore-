@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, InteractionContextType } = require('discord.js');
 const supabase = require('../../config/supabase');
 const { autocompleteServiceName } = require('../../utils/autocomplete');
+const { EMBED_COLORS, buildEmbed, errorEmbed } = require('../../utils/embeds');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -42,13 +43,31 @@ module.exports = {
     if (countResult.error) throw countResult.error;
 
     if (!serviceResult.data) {
-      return interaction.editReply(`Service \`${serviceName}\` does not exist.`);
+      return interaction.editReply({
+        embeds: [
+          errorEmbed({
+            title: 'Service Not Found',
+            description: `Service \`${serviceName}\` does not exist.`,
+          }),
+        ],
+      });
     }
 
     const remainingStock = countResult.count ?? 0;
+    const canonicalName = serviceResult.data.name;
 
-    return interaction.editReply(
-      `There are currently ${remainingStock} accounts in stock for ${serviceResult.data.name}.`
-    );
+    return interaction.editReply({
+      embeds: [
+        buildEmbed({
+          title: `Stock Status — ${canonicalName}`,
+          description: `There are currently ${remainingStock} accounts in stock for ${canonicalName}.`,
+          color: remainingStock > 0 ? EMBED_COLORS.SUCCESS : EMBED_COLORS.WARNING,
+          fields: [
+            { name: 'Service', value: `\`${canonicalName}\``, inline: true },
+            { name: 'Accounts Remaining', value: `\`${remainingStock}\``, inline: true },
+          ],
+        }),
+      ],
+    });
   },
 };
