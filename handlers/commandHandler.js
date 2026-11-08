@@ -29,7 +29,7 @@ function getCommandFiles(dirPath) {
  * Loads and validates all command modules from `commands/`.
  *
  * @param {string} [commandsDir]
- * @returns {Collection<string, { data: import('discord.js').SlashCommandBuilder, execute: Function, autocomplete?: Function }>}
+ * @returns {Collection<string, object>}
  */
 function loadCommands(commandsDir = path.join(__dirname, '..', 'commands')) {
   const commands = new Collection();
@@ -52,7 +52,30 @@ function loadCommands(commandsDir = path.join(__dirname, '..', 'commands')) {
 }
 
 /**
- * Registers slash commands on the Discord client and binds the InteractionCreate listener.
+ * Sends a standardized fallback error embed regardless of interaction state.
+ */
+async function sendFallbackErrorEmbed(interaction) {
+  const fallbackEmbed = errorEmbed({
+    title: 'Unexpected Error',
+    description: 'An unexpected internal error occurred while processing your interaction.',
+  });
+
+  try {
+    if (interaction.replied || interaction.deferred) {
+      await interaction.editReply({ embeds: [fallbackEmbed], components: [] });
+    } else {
+      await interaction.reply({
+        embeds: [fallbackEmbed],
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+  } catch (replyError) {
+    console.error('[CommandHandler] Failed to send fallback error reply:', replyError);
+  }
+}
+
+/**
+ * Registers slash commands & interactive component handlers on the Discord client.
  *
  * @param {import('discord.js').Client} client
  */
@@ -61,7 +84,7 @@ function registerCommandHandler(client) {
   console.log(`[CommandHandler] Loaded ${client.commands.size} slash command(s).`);
 
   client.on(Events.InteractionCreate, async (interaction) => {
-    // Handle Slash Command Autocomplete
+    // 1. Handle Slash Command Autocomplete
     if (interaction.isAutocomplete()) {
       const command = client.commands.get(interaction.commandName);
       if (command && typeof command.autocomplete === 'function') {
@@ -70,7 +93,35 @@ function registerCommandHandler(client) {
       return;
     }
 
-    // Handle Slash Commands
+    // 2. Handle Interactive Components (Buttons, Select Menus, Modals)
+    if (
+      interaction.isButton() ||
+      interaction.isAnySelectMenu() ||
+      interaction.isModalSubmit()
+    ) {
+      const targetCommand = client.commands.find(
+        (cmd) =>
+          typeof cmd.componentPrefix === 'string' &&
+          typeof interaction.customId === 'string' &&
+          interaction.customId.startsWith(cmd.componentPrefix) &&
+          typeof cmd.handleComponent === 'function'
+      );
+
+      if (targetCommand) {
+        try {
+          await targetCommand.handleComponent(interaction);
+        } catch (error) {
+          console.error(
+            `[CommandHandler] Unhandled component error (${interaction.customId}):`,
+            error
+          );
+          await sendFallbackErrorEmbed(interaction);
+        }
+      }
+      return;
+    }
+
+    // 3. Handle Chat Input Slash Commands
     if (!interaction.isChatInputCommand()) return;
 
     const command = client.commands.get(interaction.commandName);
@@ -86,24 +137,7 @@ function registerCommandHandler(client) {
         `[CommandHandler] Unhandled error while executing /${interaction.commandName}:`,
         error
       );
-
-      const fallbackEmbed = errorEmbed({
-        title: 'Unexpected Error',
-        description: 'An unexpected internal error occurred while processing your command.',
-      });
-
-      try {
-        if (interaction.replied || interaction.deferred) {
-          await interaction.editReply({ embeds: [fallbackEmbed] });
-        } else {
-          await interaction.reply({
-            embeds: [fallbackEmbed],
-            flags: MessageFlags.Ephemeral,
-          });
-        }
-      } catch (replyError) {
-        console.error('[CommandHandler] Failed to send fallback error reply:', replyError);
-      }
+      await sendFallbackErrorEmbed(interaction);
     }
   });
 }

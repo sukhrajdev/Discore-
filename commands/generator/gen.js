@@ -1,6 +1,10 @@
 const { SlashCommandBuilder, InteractionContextType } = require('discord.js');
 const supabase = require('../../config/supabase');
-const { getOrCreateUserRole, hasRequiredRole } = require('../../utils/rba');
+const {
+  getUserRoleRecord,
+  getRoleByName,
+  hasRequiredRole,
+} = require('../../utils/rba');
 const { autocompleteServiceName } = require('../../utils/autocomplete');
 const { successEmbed, warningEmbed, errorEmbed } = require('../../utils/embeds');
 
@@ -46,9 +50,9 @@ module.exports = {
 
     const serviceInput = interaction.options.getString('service', true).trim().toLowerCase();
 
-    // 1 & 2. Fetch the user's RBA role and the requested service configuration in parallel
-    const [userRole, serviceResult] = await Promise.all([
-      getOrCreateUserRole(supabase, interaction.user.id),
+    // 1 & 2. Fetch the user's RBA role record and the requested service in parallel
+    const [userRoleRecord, serviceResult] = await Promise.all([
+      getUserRoleRecord(supabase, interaction.user.id),
       supabase
         .from('services')
         .select('name, required_role, channel_id')
@@ -67,18 +71,29 @@ module.exports = {
       return interaction.editReply(createUnavailableReply());
     }
 
-    // 3. Check if the command was used in the correct channel_id
-    if (interaction.channelId !== service.channel_id) {
+    // Resolve the service's required role (supports built-in & custom roles)
+    const requiredRoleRecord = await getRoleByName(supabase, service.required_role);
+
+    // 3. Check if the command was used in the allowed channel
+    // Accepts the service's designated channel OR a custom role's dedicated channel_id if set
+    const allowedChannels = new Set([service.channel_id]);
+    if (userRoleRecord?.channel_id) {
+      allowedChannels.add(userRoleRecord.channel_id);
+    }
+    if (requiredRoleRecord?.channel_id) {
+      allowedChannels.add(requiredRoleRecord.channel_id);
+    }
+
+    if (!allowedChannels.has(interaction.channelId)) {
       return interaction.editReply(createUnavailableReply());
     }
 
     // 4. Check if the user's rba_role matches or exceeds required_role
-    if (!hasRequiredRole(userRole, service.required_role)) {
+    if (!hasRequiredRole(userRoleRecord, requiredRoleRecord || service.required_role)) {
       return interaction.editReply(createUnavailableReply());
     }
 
     // 6 & 7. Atomically SELECT (FOR UPDATE SKIP LOCKED) and DELETE one account row via RPC
-    // Prevents race conditions even if multiple users run /gen at the exact same millisecond
     const { data: claimedRows, error: claimError } = await supabase.rpc(
       'claim_stock_account',
       { p_service_name: service.name }

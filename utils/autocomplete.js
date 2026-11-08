@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase');
+const { getAllRoles } = require('./rba');
 
 /**
  * Shared autocomplete responder for the `service` string option.
@@ -37,6 +38,37 @@ async function autocompleteServiceName(interaction) {
   }
 }
 
+/**
+ * Shared autocomplete responder for RBA role options (including custom roles).
+ *
+ * @param {import('discord.js').AutocompleteInteraction} interaction
+ * @param {{ excludeSystem?: boolean }} [options]
+ */
+async function autocompleteRoleName(interaction, { excludeSystem = false } = {}) {
+  try {
+    const focusedValue = interaction.options.getFocused().trim().toLowerCase();
+    let roles = await getAllRoles(supabase);
+
+    if (excludeSystem) {
+      roles = roles.filter((r) => !r.is_system);
+    }
+
+    if (focusedValue.length > 0) {
+      roles = roles.filter((r) => r.name.toLowerCase().includes(focusedValue));
+    }
+
+    await interaction.respond(
+      roles.slice(0, 25).map((r) => ({
+        name: `${r.name} (Priority: ${r.priority}${r.channel_id ? ' • Channel Linked' : ''})`,
+        value: r.name,
+      }))
+    );
+  } catch {
+    // Autocomplete failures should never crash the bot process
+  }
+}
+
 module.exports = {
   autocompleteServiceName,
+  autocompleteRoleName,
 };
