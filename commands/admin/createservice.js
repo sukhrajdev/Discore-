@@ -44,7 +44,11 @@ module.exports = {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     // Enforce Admin RBA role
-    const hasAdminAccess = await isAdmin(supabase, interaction.user.id);
+    const hasAdminAccess = await isAdmin(
+      supabase,
+      interaction.user.id,
+      interaction.member
+    );
     if (!hasAdminAccess) {
       return interaction.editReply({
         embeds: [

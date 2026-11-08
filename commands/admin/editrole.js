@@ -5,6 +5,7 @@ const {
   ButtonStyle,
   ChannelSelectMenuBuilder,
   ChannelType,
+  RoleSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -18,6 +19,7 @@ const {
   isAdmin,
   deleteRoleSafely,
 } = require('../../utils/rba');
+const { parseDurationInput, formatDuration } = require('../../utils/duration');
 const { autocompleteRoleName } = require('../../utils/autocomplete');
 const {
   EMBED_COLORS,
@@ -30,10 +32,10 @@ const {
 const COMPONENT_PREFIX = 'editrole:';
 
 /**
- * Fetches live statistics and Builds the Role Control Panel payload (Embed + Buttons).
+ * Fetches live role stats and builds the interactive Role Control Panel.
  *
  * @param {string} roleName
- * @param {{ notice?: string, mode?: 'default' | 'pick_channel' | 'confirm_delete' }} [uiState]
+ * @param {{ notice?: string, mode?: 'default' | 'pick_channel' | 'pick_discord_role' | 'confirm_delete' }} [uiState]
  */
 async function buildRoleEditorPanel(roleName, uiState = {}) {
   const { notice = null, mode = 'default' } = uiState;
@@ -51,7 +53,6 @@ async function buildRoleEditorPanel(roleName, uiState = {}) {
     };
   }
 
-  // Count assigned users and linked services in parallel
   const [usersCountRes, servicesCountRes] = await Promise.all([
     supabase
       .from('users')
@@ -92,7 +93,7 @@ async function buildRoleEditorPanel(roleName, uiState = {}) {
   }
 
   const descriptionParts = [
-    'Use the interactive controls below to update this RBA role in real time.',
+    'Use the interactive controls below to update this RBA role, cooldown, channel, or Discord server role auto-sync.',
   ];
   if (notice) {
     descriptionParts.unshift(`**Update:** ${notice}\n`);
@@ -106,15 +107,23 @@ async function buildRoleEditorPanel(roleName, uiState = {}) {
       { name: 'Role Name', value: `**${role.name}**`, inline: true },
       { name: 'Priority Tier', value: `\`${role.priority}\``, inline: true },
       {
+        name: 'Gen Cooldown',
+        value: `\`${formatDuration(role.cooldown_seconds)}\``,
+        inline: true,
+      },
+      {
         name: 'Linked Channel',
         value: role.channel_id ? `<#${role.channel_id}>` : '*None (Service Default)*',
         inline: true,
       },
-      { name: 'Assigned Users', value: `\`${userCount}\` user(s)`, inline: true },
-      { name: 'Linked Services', value: `\`${serviceCount}\` service(s)`, inline: true },
       {
-        name: 'Protection',
-        value: role.is_system ? '`System Protected`' : '`Custom Editable`',
+        name: 'Synced Discord Role',
+        value: role.discord_role_id ? `<@&${role.discord_role_id}>` : '*None*',
+        inline: true,
+      },
+      {
+        name: 'Usage Stats',
+        value: `\`${userCount}\` user(s) • \`${serviceCount}\` service(s)`,
         inline: true,
       },
     ],
@@ -133,21 +142,34 @@ async function buildRoleEditorPanel(roleName, uiState = {}) {
       .setStyle(ButtonStyle.Primary)
       .setDisabled(role.is_system),
     new ButtonBuilder()
+      .setCustomId(`${COMPONENT_PREFIX}btn_cooldown:${role.name}`)
+      .setLabel('Edit Cooldown')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
       .setCustomId(`${COMPONENT_PREFIX}btn_channel:${role.name}`)
       .setLabel('Set Channel')
       .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`${COMPONENT_PREFIX}btn_discord_role:${role.name}`)
+      .setLabel('Sync Discord Role')
+      .setStyle(ButtonStyle.Secondary)
+  );
+
+  const secondaryRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`${COMPONENT_PREFIX}btn_clearchannel:${role.name}`)
       .setLabel('Clear Channel')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(!role.channel_id),
     new ButtonBuilder()
+      .setCustomId(`${COMPONENT_PREFIX}btn_cleardiscordrole:${role.name}`)
+      .setLabel('Unlink Discord Role')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!role.discord_role_id),
+    new ButtonBuilder()
       .setCustomId(`${COMPONENT_PREFIX}refresh:${role.name}`)
       .setLabel('Refresh')
-      .setStyle(ButtonStyle.Secondary)
-  );
-
-  const dangerRow = new ActionRowBuilder().addComponents(
+      .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(`${COMPONENT_PREFIX}btn_delete:${role.name}`)
       .setLabel('Delete Role')
@@ -155,26 +177,36 @@ async function buildRoleEditorPanel(roleName, uiState = {}) {
       .setDisabled(role.is_system)
   );
 
-  const components = [primaryRow, dangerRow];
+  const components = [primaryRow, secondaryRow];
 
   if (mode === 'pick_channel') {
-    const channelPickerRow = new ActionRowBuilder().addComponents(
-      new ChannelSelectMenuBuilder()
-        .setCustomId(`${COMPONENT_PREFIX}select_channel:${role.name}`)
-        .setPlaceholder('Select a Discord text channel for this role...')
-        .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-        .setMinValues(1)
-        .setMaxValues(1)
+    components.push(
+      new ActionRowBuilder().addComponents(
+        new ChannelSelectMenuBuilder()
+          .setCustomId(`${COMPONENT_PREFIX}select_channel:${role.name}`)
+          .setPlaceholder('Select a Discord text channel for this role...')
+          .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setMinValues(1)
+          .setMaxValues(1)
+      )
     );
-    components.push(channelPickerRow);
+  }
+
+  if (mode === 'pick_discord_role') {
+    components.push(
+      new ActionRowBuilder().addComponents(
+        new RoleSelectMenuBuilder()
+          .setCustomId(`${COMPONENT_PREFIX}select_discord_role:${role.name}`)
+          .setPlaceholder('Select a Discord server role to auto-sync with this RBA role...')
+          .setMinValues(1)
+          .setMaxValues(1)
+      )
+    );
   }
 
   return { embeds: [panelEmbed], components };
 }
 
-/**
- * Helper to update the parent panel message from either a MessageComponent or ModalSubmit.
- */
 async function respondWithUpdatedPanel(interaction, panelPayload) {
   if (typeof interaction.isFromMessage === 'function' && interaction.isFromMessage()) {
     return interaction.update(panelPayload);
@@ -185,12 +217,34 @@ async function respondWithUpdatedPanel(interaction, panelPayload) {
   return interaction.reply({ ...panelPayload, flags: MessageFlags.Ephemeral });
 }
 
+async function persistRoleFields(role, patch) {
+  const record = {
+    name: patch.name ?? role.name,
+    priority: patch.priority ?? role.priority,
+    channel_id: patch.channel_id !== undefined ? patch.channel_id : role.channel_id,
+    cooldown_seconds:
+      patch.cooldown_seconds !== undefined
+        ? patch.cooldown_seconds
+        : role.cooldown_seconds,
+    discord_role_id:
+      patch.discord_role_id !== undefined
+        ? patch.discord_role_id
+        : role.discord_role_id,
+    is_system: role.is_system,
+  };
+
+  const { error } = await supabase
+    .from('roles')
+    .upsert(record, { onConflict: 'name' });
+  if (error) throw error;
+}
+
 module.exports = {
   componentPrefix: COMPONENT_PREFIX,
 
   data: new SlashCommandBuilder()
     .setName('editrole')
-    .setDescription('[Admin] Open an interactive control panel to edit a role')
+    .setDescription('[Admin] Open an interactive control panel to edit an RBA role')
     .setContexts(InteractionContextType.Guild)
     .addStringOption((option) =>
       option
@@ -208,7 +262,11 @@ module.exports = {
   async execute(interaction) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    const hasAdminAccess = await isAdmin(supabase, interaction.user.id);
+    const hasAdminAccess = await isAdmin(
+      supabase,
+      interaction.user.id,
+      interaction.member
+    );
     if (!hasAdminAccess) {
       return interaction.editReply({
         embeds: [
@@ -226,10 +284,14 @@ module.exports = {
   },
 
   /**
-   * Handles all Button, ChannelSelectMenu, and ModalSubmit interactions for `/editrole`.
+   * Handles all Button, SelectMenu, and ModalSubmit interactions for `/editrole`.
    */
   async handleComponent(interaction) {
-    const hasAdminAccess = await isAdmin(supabase, interaction.user.id);
+    const hasAdminAccess = await isAdmin(
+      supabase,
+      interaction.user.id,
+      interaction.member
+    );
     if (!hasAdminAccess) {
       return interaction.reply({
         embeds: [
@@ -242,7 +304,6 @@ module.exports = {
       });
     }
 
-    // customId format: editrole:<action>:<roleName>
     const withoutPrefix = interaction.customId.slice(COMPONENT_PREFIX.length);
     const separatorIdx = withoutPrefix.indexOf(':');
     if (separatorIdx === -1) return;
@@ -263,7 +324,7 @@ module.exports = {
       });
     }
 
-    // 1. Button: Open Rename Modal
+    // 1. Button: Rename Modal
     if (interaction.isButton() && action === 'btn_rename') {
       if (role.is_system) {
         const panel = await buildRoleEditorPanel(role.name, {
@@ -289,7 +350,7 @@ module.exports = {
       return interaction.showModal(modal);
     }
 
-    // 2. Button: Open Priority Modal
+    // 2. Button: Edit Priority Modal
     if (interaction.isButton() && action === 'btn_priority') {
       if (role.is_system) {
         const panel = await buildRoleEditorPanel(role.name, {
@@ -315,46 +376,70 @@ module.exports = {
       return interaction.showModal(modal);
     }
 
-    // 3. Button: Show Channel Select Menu
+    // 3. Button: Edit Cooldown Modal
+    if (interaction.isButton() && action === 'btn_cooldown') {
+      const modal = new ModalBuilder()
+        .setCustomId(`${COMPONENT_PREFIX}modal_cooldown:${role.name}`)
+        .setTitle(`Edit Cooldown — ${role.name}`);
+
+      const cooldownInput = new TextInputBuilder()
+        .setCustomId('new_cooldown')
+        .setLabel('Cooldown (e.g., 0, 30s, 5m, 30m, 1h)')
+        .setStyle(TextInputStyle.Short)
+        .setMinLength(1)
+        .setMaxLength(16)
+        .setValue(String(role.cooldown_seconds ?? 0))
+        .setRequired(true);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(cooldownInput));
+      return interaction.showModal(modal);
+    }
+
+    // 4. Button: Show Channel Select Menu
     if (interaction.isButton() && action === 'btn_channel') {
       const panel = await buildRoleEditorPanel(role.name, { mode: 'pick_channel' });
       return interaction.update(panel);
     }
 
-    // 4. Button: Clear Linked Channel
-    if (interaction.isButton() && action === 'btn_clearchannel') {
-      const { error } = await supabase
-        .from('roles')
-        .upsert(
-          {
-            name: role.name,
-            priority: role.priority,
-            channel_id: null,
-            is_system: role.is_system,
-          },
-          { onConflict: 'name' }
-        );
-      if (error) throw error;
+    // 5. Button: Show Discord Role Select Menu
+    if (interaction.isButton() && action === 'btn_discord_role') {
+      const panel = await buildRoleEditorPanel(role.name, {
+        mode: 'pick_discord_role',
+      });
+      return interaction.update(panel);
+    }
 
+    // 6. Button: Clear Linked Channel
+    if (interaction.isButton() && action === 'btn_clearchannel') {
+      await persistRoleFields(role, { channel_id: null });
       const panel = await buildRoleEditorPanel(role.name, {
         notice: 'Linked channel cleared.',
       });
       return interaction.update(panel);
     }
 
-    // 5. Button: Refresh Panel
+    // 7. Button: Unlink Discord Role
+    if (interaction.isButton() && action === 'btn_cleardiscordrole') {
+      await persistRoleFields(role, { discord_role_id: null });
+      const panel = await buildRoleEditorPanel(role.name, {
+        notice: 'Unlinked Discord server role auto-sync.',
+      });
+      return interaction.update(panel);
+    }
+
+    // 8. Button: Refresh Panel
     if (interaction.isButton() && action === 'refresh') {
       const panel = await buildRoleEditorPanel(role.name);
       return interaction.update(panel);
     }
 
-    // 6. Button: Prompt Delete Confirmation
+    // 9. Button: Prompt Delete Confirmation
     if (interaction.isButton() && action === 'btn_delete') {
       const panel = await buildRoleEditorPanel(role.name, { mode: 'confirm_delete' });
       return interaction.update(panel);
     }
 
-    // 7. Button: Execute Confirmed Delete
+    // 10. Button: Execute Confirmed Delete
     if (interaction.isButton() && action === 'confirm_delete') {
       const result = await deleteRoleSafely(supabase, role.name);
       if (!result.ok) {
@@ -390,29 +475,31 @@ module.exports = {
       });
     }
 
-    // 8. Channel Select Menu: Set Linked Channel
+    // 11. ChannelSelectMenu: Set Linked Channel
     if (interaction.isChannelSelectMenu() && action === 'select_channel') {
       const selectedChannelId = interaction.values[0];
-      const { error } = await supabase
-        .from('roles')
-        .upsert(
-          {
-            name: role.name,
-            priority: role.priority,
-            channel_id: selectedChannelId,
-            is_system: role.is_system,
-          },
-          { onConflict: 'name' }
-        );
-      if (error) throw error;
-
+      await persistRoleFields(role, { channel_id: selectedChannelId });
       const panel = await buildRoleEditorPanel(role.name, {
         notice: `Linked channel updated to <#${selectedChannelId}>.`,
       });
       return interaction.update(panel);
     }
 
-    // 9. Modal Submit: Rename Role
+    // 12. RoleSelectMenu: Link Discord Server Role for Auto-Sync
+    if (
+      typeof interaction.isRoleSelectMenu === 'function' &&
+      interaction.isRoleSelectMenu() &&
+      action === 'select_discord_role'
+    ) {
+      const selectedDiscordRoleId = interaction.values[0];
+      await persistRoleFields(role, { discord_role_id: selectedDiscordRoleId });
+      const panel = await buildRoleEditorPanel(role.name, {
+        notice: `Synced with Discord server role <@&${selectedDiscordRoleId}>.`,
+      });
+      return interaction.update(panel);
+    }
+
+    // 13. Modal Submit: Rename Role
     if (interaction.isModalSubmit() && action === 'modal_rename') {
       const newName = interaction.fields.getTextInputValue('new_role_name').trim();
 
@@ -438,7 +525,6 @@ module.exports = {
         .eq('name', role.name);
       if (error) throw error;
 
-      // Also keep users & services synced if foreign-key ON UPDATE CASCADE isn't present
       await Promise.all([
         supabase.from('users').update({ rba_role: newName }).eq('rba_role', role.name),
         supabase
@@ -453,7 +539,7 @@ module.exports = {
       return respondWithUpdatedPanel(interaction, panel);
     }
 
-    // 10. Modal Submit: Update Priority
+    // 14. Modal Submit: Update Priority
     if (interaction.isModalSubmit() && action === 'modal_priority') {
       const rawPriority = interaction.fields.getTextInputValue('new_priority').trim();
       const parsed = Number.parseInt(rawPriority, 10);
@@ -465,14 +551,31 @@ module.exports = {
         return respondWithUpdatedPanel(interaction, panel);
       }
 
-      const { error } = await supabase
-        .from('roles')
-        .update({ priority: parsed })
-        .eq('name', role.name);
-      if (error) throw error;
-
+      await persistRoleFields(role, { priority: parsed });
       const panel = await buildRoleEditorPanel(role.name, {
         notice: `Priority tier updated to \`${parsed}\`.`,
+      });
+      return respondWithUpdatedPanel(interaction, panel);
+    }
+
+    // 15. Modal Submit: Update Cooldown
+    if (interaction.isModalSubmit() && action === 'modal_cooldown') {
+      const rawCooldown = interaction.fields.getTextInputValue('new_cooldown').trim();
+      const parsed = parseDurationInput(rawCooldown, {
+        allowZero: true,
+        allowLifetime: false,
+      });
+
+      if (!parsed.ok || parsed.seconds === null || parsed.seconds > 86400) {
+        const panel = await buildRoleEditorPanel(role.name, {
+          notice: 'Invalid cooldown. Use `0`, `30s`, `5m`, `30m`, `1h` (max 24h).',
+        });
+        return respondWithUpdatedPanel(interaction, panel);
+      }
+
+      await persistRoleFields(role, { cooldown_seconds: parsed.seconds });
+      const panel = await buildRoleEditorPanel(role.name, {
+        notice: `Generator cooldown updated to \`${formatDuration(parsed.seconds)}\`.`,
       });
       return respondWithUpdatedPanel(interaction, panel);
     }
