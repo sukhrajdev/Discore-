@@ -29,7 +29,11 @@ module.exports = {
   async execute(interaction) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    const hasAdminAccess = await isAdmin(supabase, interaction.user.id);
+    const hasAdminAccess = await isAdmin(
+      supabase,
+      interaction.user.id,
+      interaction.member
+    );
     if (!hasAdminAccess) {
       return interaction.editReply({
         embeds: [

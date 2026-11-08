@@ -14,6 +14,7 @@ const {
 } = require('discord.js');
 const supabase = require('../../config/supabase');
 const { getAllRoles, getRoleByName, isAdmin } = require('../../utils/rba');
+const { sendRestockAlert } = require('../../utils/settings');
 const { autocompleteServiceName } = require('../../utils/autocomplete');
 const {
   EMBED_COLORS,
@@ -238,7 +239,11 @@ module.exports = {
   async execute(interaction) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    const hasAdminAccess = await isAdmin(supabase, interaction.user.id);
+    const hasAdminAccess = await isAdmin(
+      supabase,
+      interaction.user.id,
+      interaction.member
+    );
     if (!hasAdminAccess) {
       return interaction.editReply({
         embeds: [
@@ -259,7 +264,11 @@ module.exports = {
    * Handles all Button, SelectMenu, and ModalSubmit interactions for `/editservice`.
    */
   async handleComponent(interaction) {
-    const hasAdminAccess = await isAdmin(supabase, interaction.user.id);
+    const hasAdminAccess = await isAdmin(
+      supabase,
+      interaction.user.id,
+      interaction.member
+    );
     if (!hasAdminAccess) {
       return interaction.reply({
         embeds: [
@@ -540,6 +549,19 @@ module.exports = {
 
       const { error } = await supabase.from('stock').insert(rowsToInsert);
       if (error) throw error;
+
+      const { count: updatedTotal } = await supabase
+        .from('stock')
+        .select('*', { count: 'exact', head: true })
+        .eq('service_name', service.name);
+
+      await sendRestockAlert({
+        client: interaction.client,
+        supabase,
+        service,
+        addedCount: rowsToInsert.length,
+        totalStock: updatedTotal ?? rowsToInsert.length,
+      });
 
       const panel = await buildServiceEditorPanel(service.name, {
         notice: `Added **${rowsToInsert.length}** account(s) to **${service.name}** stock.`,

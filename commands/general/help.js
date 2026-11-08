@@ -1,6 +1,7 @@
 const { SlashCommandBuilder } = require('discord.js');
 const supabase = require('../../config/supabase');
 const { getAllRoles, getOrCreateUserRole } = require('../../utils/rba');
+const { formatDuration } = require('../../utils/duration');
 const { infoEmbed, errorEmbed } = require('../../utils/embeds');
 
 const COMMAND_DETAILS = Object.freeze({
@@ -10,14 +11,14 @@ const COMMAND_DETAILS = Object.freeze({
     visibility: 'Public Embed',
     description:
       'Displays all available bot commands, active RBA roles, or detailed usage information for a specific command.',
-    example: '/help command:editrole',
+    example: '/help command:restock',
   },
   gen: {
     usage: '/gen [service]',
     role: 'Matches or exceeds service required_role',
     visibility: 'Public Embed + Direct Message Embed',
     description:
-      'Atomically claims and deletes 1 account from the requested service stock (inside the designated service or role channel) and delivers credentials to your DMs.',
+      'Atomically claims and deletes 1 account from stock (enforcing blacklist, alt-age, and per-role cooldowns) and sends credentials via DM.',
     example: '/gen service:mcfa',
   },
   stock: {
@@ -43,6 +44,14 @@ const COMMAND_DETAILS = Object.freeze({
     description:
       'Lists all configured generator services along with their minimum RBA role and designated Discord channel.',
     example: '/services',
+  },
+  redeem: {
+    usage: '/redeem [key]',
+    role: 'Free (Everyone)',
+    visibility: 'Ephemeral Embed',
+    description:
+      'Redeems a license key to unlock a timed or lifetime RBA role subscription (stacks remaining time if already active).',
+    example: '/redeem key:DISC-ABCD-EFGH-JKLM',
   },
   createservice: {
     usage: '/createservice [name] [role] [channel(optional)]',
@@ -73,23 +82,31 @@ const COMMAND_DETAILS = Object.freeze({
     role: 'Admin',
     visibility: 'Ephemeral Embed',
     description:
-      'Adds a new account (email + password) into the Stock pool for an existing service without exposing credentials publicly.',
+      'Adds a single account into the Stock pool and triggers a Restock Alert if configured.',
     example: '/addstock service:mcfa email:user@example.com password:secretPassword',
   },
+  restock: {
+    usage: '/restock [service] [file] [announce] [channel] [ping_role]',
+    role: 'Admin',
+    visibility: 'Ephemeral Embed + Optional Restock Alert',
+    description:
+      'Bulk imports accounts from an uploaded `.txt` file (`email:password` per line) with automatic deduplication and Restock Alert broadcasting.',
+    example: '/restock service:mcfa file:accounts.txt',
+  },
   createrole: {
-    usage: '/createrole [name] [channel(optional)] [priority(optional)]',
+    usage: '/createrole [name] [channel] [priority] [cooldown] [discord_role]',
     role: 'Admin',
     visibility: 'Ephemeral Embed',
     description:
-      'Creates a custom RBA role with an optional dedicated Discord channel and hierarchy tier priority.',
-    example: '/createrole name:VIP channel:#vip-gen priority:40',
+      'Creates a custom RBA role with optional channel, priority tier, `/gen` cooldown, and Discord server role auto-sync.',
+    example: '/createrole name:VIP cooldown:120 discord_role:@Booster',
   },
   editrole: {
     usage: '/editrole [name]',
     role: 'Admin',
     visibility: 'Ephemeral Interactive Embed + Buttons',
     description:
-      'Opens an interactive control panel with buttons, modals, and channel pickers to rename a custom role, adjust its priority tier, set/clear its channel, or delete it.',
+      'Interactive button panel to rename a custom role, edit priority/cooldown, link a channel, sync a Discord server role, or delete it.',
     example: '/editrole name:VIP',
   },
   deleterole: {
@@ -105,8 +122,32 @@ const COMMAND_DETAILS = Object.freeze({
     role: 'Admin',
     visibility: 'Ephemeral Embed',
     description:
-      "Updates a user's RBA role in the database (built-in roles, custom roles, or promoting another user to Admin).",
+      "Updates a user's permanent RBA role (built-in roles, custom roles, or promoting another user to Admin).",
     example: '/setrole user:@Member role:Admin',
+  },
+  createkey: {
+    usage: '/createkey [role] [duration] [amount]',
+    role: 'Admin',
+    visibility: 'Ephemeral Embed',
+    description:
+      'Generates 1–25 cryptographically random license keys (`DISC-XXXX-XXXX-XXXX`) for timed (`7d`, `30d`) or `lifetime` subscriptions.',
+    example: '/createkey role:Premium duration:30d amount:5',
+  },
+  blacklist: {
+    usage: '/blacklist add|remove|list',
+    role: 'Admin',
+    visibility: 'Ephemeral Embed',
+    description:
+      'Blocks or unblocks users from generating accounts and redeeming license keys.',
+    example: '/blacklist add user:@Abuser reason:Farming accounts',
+  },
+  settings: {
+    usage: '/settings',
+    role: 'Admin',
+    visibility: 'Ephemeral Interactive Embed + Buttons',
+    description:
+      'Interactive panel to configure automatic Restock Alert channels, Restock Ping roles, and minimum Discord account age protection.',
+    example: '/settings',
   },
 });
 
@@ -138,13 +179,16 @@ module.exports = {
 
     try {
       const [fetchedUserRole, allRoles] = await Promise.all([
-        getOrCreateUserRole(supabase, interaction.user.id),
+        getOrCreateUserRole(supabase, interaction.user.id, interaction.member),
         getAllRoles(supabase),
       ]);
       userRole = fetchedUserRole;
       if (allRoles.length > 0) {
         roleHierarchyLine = allRoles
-          .map((r) => `\`${r.name} (${r.priority})\``)
+          .map(
+            (r) =>
+              `\`${r.name} (Tier ${r.priority} • CD ${formatDuration(r.cooldown_seconds)})\``
+          )
           .join(' ➜ ');
       }
     } catch {
@@ -177,7 +221,7 @@ module.exports = {
               { name: 'Response Type', value: detail.visibility, inline: true },
               { name: 'Example', value: `\`${detail.example}\``, inline: false },
             ],
-            footer: `Your current RBA Role: ${userRole}`,
+            footer: `Your Effective RBA Role: ${userRole}`,
           }),
         ],
       });
@@ -185,41 +229,39 @@ module.exports = {
 
     const overviewEmbed = infoEmbed({
       title: 'Account Generator Bot — Help Menu',
-      description: `Hello <@${interaction.user.id}>! Your current RBA role is **${userRole}**.`,
+      description: `Hello <@${interaction.user.id}>! Your effective RBA role is **${userRole}**.`,
       fields: [
         {
-          name: 'Generator & General Commands',
+          name: 'Member & Generator Commands',
           value: [
             '`/help [command]` — View all commands or detailed command info.',
             '`/gen [service]` — Claim an account from stock (delivered via DM).',
-            '`/stock [service]` — Check remaining stock for a single service.',
-            '`/stocks` — View remaining stock across all services.',
-            '`/services` — List all generator services, required roles, and channels.',
+            '`/stock [service]` • `/stocks` • `/services` — View stock & services.',
+            '`/redeem [key]` — Redeem a license key for a timed/lifetime role.',
           ].join('\n'),
           inline: false,
         },
         {
-          name: 'Service & Stock Admin Commands',
+          name: 'Service & Restock Admin Commands',
           value: [
-            '`/createservice [name] [role] [channel]` — Create a generator service.',
-            '`/editservice [name]` — Interactive button panel to edit service & stock.',
-            '`/deleteservice [name]` — Delete a service and its remaining stock.',
-            '`/addstock [service] [email] [password]` — Add an account to stock.',
+            '`/createservice` • `/editservice` • `/deleteservice` — Manage services.',
+            '`/restock [service] [file]` — Bulk `.txt` restock + auto Restock Alert.',
+            '`/addstock [service] [email] [password]` — Add single stock account.',
           ].join('\n'),
           inline: false,
         },
         {
-          name: 'Role & User Admin Commands',
+          name: 'Roles, Keys & Security Admin Commands',
           value: [
-            '`/createrole [name] [channel]` — Create a custom RBA role.',
-            '`/editrole [name]` — Interactive button panel to edit a role.',
-            '`/deleterole [name]` — Delete a custom RBA role.',
-            '`/setrole [user] [role]` — Assign any built-in/custom/Admin role.',
+            '`/createrole` • `/editrole` • `/deleterole` • `/setrole` — Manage roles & sync.',
+            '`/createkey [role] [duration] [amount]` — Generate subscription keys.',
+            '`/blacklist add|remove|list` — Block abusive users.',
+            '`/settings` — Configure Restock Alerts & alt-account age protection.',
           ].join('\n'),
           inline: false,
         },
         {
-          name: 'Active RBA Roles (Priority Tiers)',
+          name: 'Active RBA Roles & Cooldowns',
           value: roleHierarchyLine,
           inline: false,
         },

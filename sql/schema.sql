@@ -3,42 +3,51 @@
 -- Run this entire script in the Supabase SQL Editor (safe for fresh & existing DBs).
 -- ============================================================================
 
--- Ensure pgcrypto is enabled for gen_random_uuid()
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- ----------------------------------------------------------------------------
--- 1. Roles Table (Built-In + Custom RBA Roles)
+-- 1. Roles Table (Built-In + Custom RBA Roles, Cooldowns, & Discord Role Sync)
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.roles (
     name TEXT PRIMARY KEY,
     priority INTEGER NOT NULL DEFAULT 25,
     channel_id TEXT NULL,
+    cooldown_seconds INTEGER NOT NULL DEFAULT 300 CHECK (cooldown_seconds >= 0),
+    discord_role_id TEXT NULL,
     is_system BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Seed core roles (Free = 1, Premium = 50, Admin = 100)
-INSERT INTO public.roles (name, priority, channel_id, is_system)
+-- Idempotent column upgrades for existing databases
+ALTER TABLE public.roles
+    ADD COLUMN IF NOT EXISTS cooldown_seconds INTEGER NOT NULL DEFAULT 300;
+ALTER TABLE public.roles
+    ADD COLUMN IF NOT EXISTS discord_role_id TEXT NULL;
+
+-- Seed core roles (Free = 30m cooldown, Premium = 5m cooldown, Admin = 0s cooldown)
+INSERT INTO public.roles (name, priority, channel_id, cooldown_seconds, discord_role_id, is_system)
 VALUES
-    ('Free', 1, NULL, TRUE),
-    ('Premium', 50, NULL, FALSE),
-    ('Admin', 100, NULL, TRUE)
+    ('Free', 1, NULL, 1800, NULL, TRUE),
+    ('Premium', 50, NULL, 300, NULL, FALSE),
+    ('Admin', 100, NULL, 0, NULL, TRUE)
 ON CONFLICT (name) DO NOTHING;
 
 -- ----------------------------------------------------------------------------
--- 2. Users Table (User Role Assignments)
+-- 2. Users Table (Role Assignments, Timed Subscriptions, & Cooldown Tracking)
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.users (
     discord_id TEXT PRIMARY KEY,
     rba_role TEXT NOT NULL DEFAULT 'Free',
+    role_expires_at TIMESTAMPTZ NULL,
+    last_gen_at TIMESTAMPTZ NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Remove legacy hardcoded check constraint if upgrading from an earlier schema
 ALTER TABLE public.users DROP CONSTRAINT IF EXISTS users_rba_role_check;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS role_expires_at TIMESTAMPTZ NULL;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS last_gen_at TIMESTAMPTZ NULL;
 
--- Automatically update updated_at on row changes
 CREATE OR REPLACE FUNCTION public.set_updated_at()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -65,10 +74,8 @@ CREATE TABLE IF NOT EXISTS public.services (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Remove legacy hardcoded check constraint if upgrading from an earlier schema
 ALTER TABLE public.services DROP CONSTRAINT IF EXISTS services_required_role_check;
 
--- Backfill any pre-existing custom role names before adding foreign keys
 INSERT INTO public.roles (name, priority)
 SELECT DISTINCT rba_role, 25
 FROM public.users
@@ -81,7 +88,6 @@ FROM public.services
 WHERE required_role IS NOT NULL
 ON CONFLICT (name) DO NOTHING;
 
--- Link users.rba_role and services.required_role to roles.name with ON UPDATE CASCADE
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -115,20 +121,61 @@ CREATE TABLE IF NOT EXISTS public.stock (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Composite index for fast FIFO claiming and exact per-service stock counting
 CREATE INDEX IF NOT EXISTS idx_stock_service_name_created_at
     ON public.stock (service_name, created_at ASC, id ASC);
 
 -- ----------------------------------------------------------------------------
--- 5. Row Level Security (Lock out public anon key; service_role bypasses RLS)
+-- 5. License Keys Table (Redeemable Timed & Lifetime Role Keys)
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.license_keys (
+    key TEXT PRIMARY KEY,
+    role_name TEXT NOT NULL REFERENCES public.roles(name) ON DELETE CASCADE ON UPDATE CASCADE,
+    duration_seconds BIGINT NULL CHECK (duration_seconds IS NULL OR duration_seconds > 0),
+    created_by TEXT NOT NULL,
+    redeemed_by TEXT NULL,
+    redeemed_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_license_keys_unredeemed
+    ON public.license_keys (key)
+    WHERE redeemed_by IS NULL;
+
+-- ----------------------------------------------------------------------------
+-- 6. Blacklist & Bot Settings Tables (Moderation, Alt-Protection, & Restocks)
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.blacklist (
+    discord_id TEXT PRIMARY KEY,
+    reason TEXT NOT NULL DEFAULT 'No reason provided',
+    blacklisted_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.bot_settings (
+    id TEXT PRIMARY KEY DEFAULT 'default',
+    restock_channel_id TEXT NULL,
+    restock_ping_role_id TEXT NULL,
+    min_account_age_days INTEGER NOT NULL DEFAULT 0 CHECK (min_account_age_days >= 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO public.bot_settings (id, min_account_age_days)
+VALUES ('default', 0)
+ON CONFLICT (id) DO NOTHING;
+
+-- ----------------------------------------------------------------------------
+-- 7. Row Level Security (Lock out public anon key; service_role bypasses RLS)
 -- ----------------------------------------------------------------------------
 ALTER TABLE public.roles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.services ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.stock ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.license_keys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.blacklist ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.bot_settings ENABLE ROW LEVEL SECURITY;
 
 -- ----------------------------------------------------------------------------
--- 6. Atomic Account Claim & Delete RPC (Eliminates Race Conditions)
+-- 8. Atomic Account Claim & Delete RPC (Eliminates /gen Race Conditions)
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.claim_stock_account(p_service_name TEXT)
 RETURNS TABLE (
@@ -162,7 +209,7 @@ REVOKE ALL ON FUNCTION public.claim_stock_account(TEXT) FROM PUBLIC, anon, authe
 GRANT EXECUTE ON FUNCTION public.claim_stock_account(TEXT) TO service_role;
 
 -- ----------------------------------------------------------------------------
--- 7. Aggregated Service Stock Counts RPC (Powers /stocks in a single query)
+-- 9. Aggregated Service Stock Counts RPC (Powers /stocks)
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.get_all_service_stocks()
 RETURNS TABLE (
@@ -190,9 +237,67 @@ REVOKE ALL ON FUNCTION public.get_all_service_stocks() FROM PUBLIC, anon, authen
 GRANT EXECUTE ON FUNCTION public.get_all_service_stocks() TO service_role;
 
 -- ----------------------------------------------------------------------------
--- 8. Optional: Bootstrap Your Initial Admin User
--- Replace YOUR_DISCORD_USER_ID with your 18/19-digit Discord Snowflake ID
+-- 10. Atomic License Key Redemption RPC (Prevents Concurrent Key Double-Spend)
 -- ----------------------------------------------------------------------------
--- INSERT INTO public.users (discord_id, rba_role)
--- VALUES ('YOUR_DISCORD_USER_ID', 'Admin')
--- ON CONFLICT (discord_id) DO UPDATE SET rba_role = 'Admin';
+CREATE OR REPLACE FUNCTION public.redeem_license_key(p_key TEXT, p_discord_id TEXT)
+RETURNS TABLE (
+    role_name TEXT,
+    duration_seconds BIGINT,
+    new_expires_at TIMESTAMPTZ
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_key RECORD;
+    v_user RECORD;
+    v_expires TIMESTAMPTZ;
+BEGIN
+    -- Atomically lock the key row if it exists and is unredeemed
+    SELECT lk.key, lk.role_name, lk.duration_seconds
+    INTO v_key
+    FROM public.license_keys AS lk
+    WHERE lk.key = p_key AND lk.redeemed_by IS NULL
+    FOR UPDATE SKIP LOCKED;
+
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    -- Mark key as redeemed
+    UPDATE public.license_keys
+    SET redeemed_by = p_discord_id,
+        redeemed_at = NOW()
+    WHERE key = v_key.key;
+
+    -- Fetch existing user state to support time stacking on identical active roles
+    SELECT u.rba_role, u.role_expires_at
+    INTO v_user
+    FROM public.users AS u
+    WHERE u.discord_id = p_discord_id
+    FOR UPDATE;
+
+    IF v_key.duration_seconds IS NULL THEN
+        v_expires := NULL;
+    ELSIF FOUND
+          AND lower(v_user.rba_role) = lower(v_key.role_name)
+          AND v_user.role_expires_at IS NOT NULL
+          AND v_user.role_expires_at > NOW() THEN
+        v_expires := v_user.role_expires_at + make_interval(secs => v_key.duration_seconds::DOUBLE PRECISION);
+    ELSE
+        v_expires := NOW() + make_interval(secs => v_key.duration_seconds::DOUBLE PRECISION);
+    END IF;
+
+    INSERT INTO public.users (discord_id, rba_role, role_expires_at)
+    VALUES (p_discord_id, v_key.role_name, v_expires)
+    ON CONFLICT (discord_id) DO UPDATE
+        SET rba_role = EXCLUDED.rba_role,
+            role_expires_at = EXCLUDED.role_expires_at;
+
+    RETURN QUERY SELECT v_key.role_name, v_key.duration_seconds, v_expires;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.redeem_license_key(TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.redeem_license_key(TEXT, TEXT) TO service_role;

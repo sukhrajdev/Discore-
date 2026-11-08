@@ -11,7 +11,7 @@ const { successEmbed, warningEmbed, errorEmbed } = require('../../utils/embeds')
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('setrole')
-    .setDescription("[Admin] Update a user's RBA role (built-in, custom role, or grant Admin)")
+    .setDescription("[Admin] Update a user's permanent RBA role (built-in, custom, or Admin)")
     .setContexts(InteractionContextType.Guild)
     .addUserOption((option) =>
       option
@@ -35,8 +35,11 @@ module.exports = {
   async execute(interaction) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    // Enforce Admin RBA role — any existing Admin can grant Free, Premium, custom roles, or Admin
-    const hasAdminAccess = await isAdmin(supabase, interaction.user.id);
+    const hasAdminAccess = await isAdmin(
+      supabase,
+      interaction.user.id,
+      interaction.member
+    );
     if (!hasAdminAccess) {
       return interaction.editReply({
         embeds: [
@@ -74,7 +77,6 @@ module.exports = {
       });
     }
 
-    // Prevent an Admin from accidentally demoting themselves and losing Admin access
     if (
       targetUser.id === interaction.user.id &&
       resolvedRole.name.toLowerCase() !== 'admin'
@@ -96,6 +98,7 @@ module.exports = {
         {
           discord_id: targetUser.id,
           rba_role: resolvedRole.name,
+          role_expires_at: null, // Permanent manual assignment clears any timed expiration
         },
         { onConflict: 'discord_id' }
       )
@@ -113,8 +116,8 @@ module.exports = {
         successEmbed({
           title: isAdminPromotion ? 'Admin Role Granted' : 'User Role Updated',
           description: isAdminPromotion
-            ? `<@${data.discord_id}> has been granted the **Admin** RBA role and can now manage roles, services, stock, and users.`
-            : `Updated <@${data.discord_id}>'s RBA role to **${data.rba_role}**.`,
+            ? `<@${data.discord_id}> has been granted the **Admin** RBA role and can now manage roles, services, stock, keys, and users.`
+            : `Updated <@${data.discord_id}>'s permanent RBA role to **${data.rba_role}**.`,
           fields: [
             { name: 'User', value: `<@${data.discord_id}>`, inline: true },
             { name: 'Assigned Role', value: `**${data.rba_role}**`, inline: true },

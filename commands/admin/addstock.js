@@ -6,6 +6,7 @@ const {
 const supabase = require('../../config/supabase');
 const { isAdmin } = require('../../utils/rba');
 const { autocompleteServiceName } = require('../../utils/autocomplete');
+const { sendRestockAlert } = require('../../utils/settings');
 const { successEmbed, errorEmbed } = require('../../utils/embeds');
 
 module.exports = {
@@ -39,11 +40,13 @@ module.exports = {
    * @param {import('discord.js').ChatInputCommandInteraction} interaction
    */
   async execute(interaction) {
-    // Ephemeral embed reply ensures credentials/admin confirmations never leak to public chat
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    // Enforce Admin RBA role
-    const hasAdminAccess = await isAdmin(supabase, interaction.user.id);
+    const hasAdminAccess = await isAdmin(
+      supabase,
+      interaction.user.id,
+      interaction.member
+    );
     if (!hasAdminAccess) {
       return interaction.editReply({
         embeds: [
@@ -81,7 +84,6 @@ module.exports = {
       .single();
 
     if (error) {
-      // PostgreSQL foreign_key_violation (service_name not in `services`)
       if (error.code === '23503') {
         return interaction.editReply({
           embeds: [
@@ -93,6 +95,29 @@ module.exports = {
         });
       }
       throw error;
+    }
+
+    // Trigger Restock Alert if a restock channel is configured in /settings
+    const [{ data: svcRow }, { count: totalStock }] = await Promise.all([
+      supabase
+        .from('services')
+        .select('name, required_role, channel_id')
+        .eq('name', data.service_name)
+        .maybeSingle(),
+      supabase
+        .from('stock')
+        .select('*', { count: 'exact', head: true })
+        .eq('service_name', data.service_name),
+    ]);
+
+    if (svcRow) {
+      await sendRestockAlert({
+        client: interaction.client,
+        supabase,
+        service: svcRow,
+        addedCount: 1,
+        totalStock: totalStock ?? 1,
+      });
     }
 
     return interaction.editReply({

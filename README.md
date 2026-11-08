@@ -1,6 +1,17 @@
 # Discore — Modular Account Generator Bot (Discord.js v14 + Supabase)
 
-A production-ready, modular **Account Generator Discord Bot** built with **Node.js**, **Discord.js v14** (Slash Commands, Rich Embeds, Interactive Buttons/Modals/Select Menus, & Autocomplete), and **Supabase (PostgreSQL)** featuring **Custom Role-Based Access Control (RBA)** and **race-condition-free atomic account claiming**.
+A commercial-grade, modular **Account Generator Discord Bot** built with **Node.js**, **Discord.js v14** (Slash Commands, Rich Embeds, Interactive Control Panels, & Autocomplete), and **Supabase (PostgreSQL)**.
+
+---
+
+## Core Capabilities
+
+- **Atomic Race-Condition-Free Generation**: Uses PostgreSQL `SELECT ... FOR UPDATE SKIP LOCKED` + `DELETE ... RETURNING` (`claim_stock_account` RPC) with automatic closed-DM stock rollback.
+- **Custom RBA Roles & Per-Role Cooldowns**: Create custom roles (`/createrole`) with dedicated channels and per-role `/gen` cooldowns (`cooldown_seconds`), editable live via `/editrole`.
+- **Discord Server Role Auto-Sync**: Link any Discord server role (e.g., `@Server Booster`, `@VIP`) to an RBA role so members automatically receive generator access without manual `/setrole`.
+- **Bulk `.txt` Restocking & Auto Restock Alerts**: Upload `.txt` account files via `/restock` with automatic duplicate filtering and instant `#restocks` channel + `@Restock Ping` embed alerts.
+- **License Keys & Timed Subscriptions**: Generate `DISC-XXXX-XXXX-XXXX` keys (`/createkey`) for `7d`, `30d`, or `lifetime` plans; users claim via `/redeem` with automatic duration stacking and expiration.
+- **Blacklist & Alt-Account Age Protection**: Block abusive users via `/blacklist` and enforce a minimum Discord account age (in days) on `Free` tier users via `/settings`.
 
 ---
 
@@ -11,20 +22,25 @@ Discore-/
 ├── commands/
 │   ├── admin/
 │   │   ├── addstock.js         # /addstock [service] [email] [password]
-│   │   ├── createrole.js       # /createrole [name] [channel(optional)] [priority(optional)]
-│   │   ├── createservice.js    # /createservice [name] [role] [channel(optional)]
+│   │   ├── blacklist.js        # /blacklist add|remove|list
+│   │   ├── createkey.js        # /createkey [role] [duration] [amount]
+│   │   ├── createrole.js       # /createrole [name] [channel] [priority] [cooldown] [discord_role]
+│   │   ├── createservice.js    # /createservice [name] [role] [channel]
 │   │   ├── deleterole.js       # /deleterole [name]
 │   │   ├── deleteservice.js    # /deleteservice [name]
-│   │   ├── editrole.js         # /editrole [name] (interactive embed + buttons/modals/channel picker)
-│   │   ├── editservice.js      # /editservice [name] (interactive embed + buttons/modals/role & channel pickers)
-│   │   └── setrole.js          # /setrole [user] [role] (custom roles & Admin promotion)
+│   │   ├── editrole.js         # /editrole [name] (interactive embed + buttons/modals/pickers)
+│   │   ├── editservice.js      # /editservice [name] (interactive embed + buttons/modals/pickers)
+│   │   ├── restock.js          # /restock [service] [file] (.txt bulk restocker + alert)
+│   │   ├── setrole.js          # /setrole [user] [role]
+│   │   └── settings.js         # /settings (interactive Restock Alert & alt-age panel)
 │   ├── general/
-│   │   └── help.js             # /help [command]
+│   │   ├── help.js             # /help [command]
+│   │   └── redeem.js           # /redeem [key]
 │   └── generator/
-│       ├── gen.js              # /gen [service] (atomic RPC claim + DM embed + rollback)
-│       ├── services.js         # /services (all services overview embed)
-│       ├── stock.js            # /stock [service] (single service count embed)
-│       └── stocks.js           # /stocks (all services remaining stock embed)
+│       ├── gen.js              # /gen [service]
+│       ├── services.js         # /services
+│       ├── stock.js            # /stock [service]
+│       └── stocks.js           # /stocks
 ├── config/
 │   └── supabase.js             # Singleton Supabase service-role client
 ├── handlers/
@@ -32,79 +48,45 @@ Discore-/
 ├── scripts/
 │   └── seed-admin.js           # CLI helper to bootstrap the first Admin user
 ├── sql/
-│   └── schema.sql              # Full PostgreSQL DDL (roles, users, services, stock), RLS, & RPCs
+│   └── schema.sql              # Full PostgreSQL DDL, RLS policies, & atomic RPCs
 ├── tests/
-│   └── bot.test.js             # Automated test suite (Node built-in test runner)
+│   └── bot.test.js             # Automated end-to-end test suite
 ├── utils/
 │   ├── autocomplete.js         # Live service & custom role autocomplete helpers
+│   ├── duration.js             # Duration parser, key generator, & Snowflake age helper
 │   ├── embeds.js               # Centralized Discord EmbedBuilder factory
-│   └── rba.js                  # Dynamic RBA role hierarchy & safe role lifecycle helpers
-├── .env.example                # Environment variable template
-├── deploy-commands.js          # Discord REST slash-command registration script
-├── index.js                    # Bot initialization & lifecycle entry point
+│   ├── rba.js                  # Dynamic RBA roles, cooldowns, Discord role sync, & expiry
+│   └── settings.js             # Bot settings, blacklist checks, & Restock Alert broadcaster
+├── .env.example
+├── deploy-commands.js
+├── index.js
 └── package.json
 ```
 
 ---
 
-## Setup Instructions
+## Setup & Deployment
 
-### 1. Install Dependencies
-
-Ensure **Node.js v18+** is installed, then run:
-
-```bash
-npm install
-```
-
-### 2. Provision / Update the Supabase Database Schema
-
-1. Open the **SQL Editor** in your [Supabase Dashboard](https://supabase.com/).
-2. Paste and run the full contents of [`sql/schema.sql`](./sql/schema.sql) *(safe to run on both brand-new and existing projects)*.
-   - Creates `roles`, `users`, `services`, and `stock` tables (seeding `Free`, `Premium`, and `Admin`).
-   - Enables **Row Level Security (RLS)** on all tables.
-   - Creates `claim_stock_account` (atomic `FOR UPDATE SKIP LOCKED` + `DELETE ... RETURNING`) and `get_all_service_stocks` RPCs.
-
-### 3. Configure Environment Variables
-
-```bash
-cp .env.example .env
-```
-
-Fill in `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `SUPABASE_URL`, and `SUPABASE_SERVICE_KEY` (plus optional `DISCORD_GUILD_ID` for instant guild command sync).
-
-### 4. Bootstrap Your First Admin User
-
-```bash
-npm run seed-admin -- YOUR_DISCORD_USER_ID
-```
-
-### 5. Deploy Slash Commands & Start the Bot
-
-```bash
-npm run deploy
-npm start
-```
-
----
-
-## Slash Commands Reference (100% Embeds & Interactive Panels)
-
-| Command | Access | Visibility | Description |
-| :--- | :--- | :--- | :--- |
-| `/help [command]` | Everyone | Public Embed | Displays all commands, active RBA roles, or detailed usage for a specific command. |
-| `/gen [service]` | RBA Role >= `required_role` | Public Embed + DM Embed | Atomically claims & deletes 1 account from `stock` and sends credentials via DM Embed. |
-| `/stock [service]` | Everyone | Public Embed | Shows remaining stock count for one service. |
-| `/stocks` | Everyone | Public Embed | Shows remaining stock across **all** services (`service: X remaining`). |
-| `/services` | Everyone | Public Embed | Lists all generator services with their required roles and channels. |
-| `/createrole [name] [channel] [priority]` | `Admin` | Ephemeral Embed | Creates a custom RBA role with an optional dedicated channel and priority tier. |
-| `/editrole [name]` | `Admin` | Interactive Ephemeral Panel | Interactive embed with buttons, modals, and channel selector to rename, re-tier, link/clear channel, or delete a role. |
-| `/deleterole [name]` | `Admin` | Ephemeral Embed | Safely deletes a custom role (resets assigned users to `Free` and locks dependent services to `Admin`). |
-| `/createservice [name] [role] [channel]` | `Admin` | Ephemeral Embed | Creates a new generator service (supports custom roles and inherits role channel if omitted). |
-| `/editservice [name]` | `Admin` | Interactive Ephemeral Panel | Interactive embed with buttons, modals, and dropdowns to rename, change role/channel, bulk-add/clear stock, or delete a service. |
-| `/deleteservice [name]` | `Admin` | Ephemeral Embed | Permanently deletes a generator service and its remaining stock. |
-| `/addstock [service] [email] [password]` | `Admin` | Ephemeral Embed | Adds a single account to `stock`. |
-| `/setrole [user] [role]` | `Admin` | Ephemeral Embed | Assigns any built-in role, custom role, or `Admin` to a user. |
+1. **Install dependencies**:
+   ```bash
+   npm install
+   ```
+2. **Apply the Supabase SQL schema**:
+   Run [`sql/schema.sql`](./sql/schema.sql) in the Supabase **SQL Editor** *(idempotent—safe for both new and existing databases)*.
+3. **Configure `.env`**:
+   ```bash
+   cp .env.example .env
+   ```
+   Populate `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `SUPABASE_URL`, and `SUPABASE_SERVICE_KEY`.
+4. **Bootstrap your first Admin**:
+   ```bash
+   npm run seed-admin -- YOUR_DISCORD_USER_ID
+   ```
+5. **Register slash commands & start**:
+   ```bash
+   npm run deploy
+   npm start
+   ```
 
 ---
 
