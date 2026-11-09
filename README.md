@@ -2,6 +2,20 @@
 
 A commercial-grade, modular **Account Generator Discord Bot** built with **Node.js**, **Discord.js v14** (Slash Commands, Rich Embeds, Interactive Control Panels, & Autocomplete), and **Supabase (PostgreSQL)**.
 
+<div align="center">
+
+### 🎬 Official 30s Animated Launch Trailer
+
+[![Discore 30s Animated Trailer Preview](./trailer/discore-trailer-preview.gif)](./trailer/discore-trailer.mp4)
+
+**[▶️ Watch / Download Full 1080p HD Trailer with Audio (`discore-trailer.mp4`)](./trailer/discore-trailer.mp4)** · **[⬇️ Direct Raw MP4 Download](https://github.com/sukhrajdev/Discore-/raw/main/trailer/discore-trailer.mp4)**
+
+| 💳 Paid Instant Unlock | 🎁 Free Community Unlock |
+| :---: | :---: |
+| **`4$ (Paid)`** — Full Bot + Complete Source Code | **`15 Invites (Non-Paid)`** — Full Bot + Complete Source Code |
+
+</div>
+
 ---
 
 ## Core Capabilities
@@ -51,6 +65,9 @@ Discore-/
 │   └── schema.sql              # Full PostgreSQL DDL, RLS policies, & atomic RPCs
 ├── tests/
 │   └── bot.test.js             # Automated end-to-end test suite
+├── trailer/
+│   ├── discore-trailer.mp4         # Full 30s 1080p 30fps animated trailer (with audio)
+│   └── discore-trailer-preview.gif # Inline GitHub README animated preview
 ├── utils/
 │   ├── autocomplete.js         # Live service & custom role autocomplete helpers
 │   ├── duration.js             # Duration parser, key generator, & Snowflake age helper
